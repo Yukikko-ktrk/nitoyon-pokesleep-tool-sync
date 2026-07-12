@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeSleep Tool GitHub Sync
 // @namespace    nitoyon-pokesleep-tool-sync
-// @version      2.1.0
+// @version      2.1.1
 // @description  nitoyon pokesleep-tool のボックスを GitHub 上の md ファイル (1行1匹のエクスポート形式) と自動同期する
 // @match        https://nitoyon.github.io/pokesleep-tool/*
 // @grant        none
@@ -12,6 +12,9 @@
 
 (function () {
 	'use strict';
+
+	// 動作診断用のログ。F12 コンソールで [ghsync] を検索すればどこまで動いたか分かる
+	console.log('[ghsync] script loaded (v2.1.1)', location.href);
 
 	// ボックスの localStorage キー。中身は ["シリアル値@ニックネーム", ...] の JSON 配列で、
 	// md ファイルの各行と 1:1 に対応する (ツールのカスタム形式エクスポートと同一)
@@ -134,6 +137,7 @@
 	function setStatus(state, title) {
 		if (!badge) {
 			badge = document.createElement('div');
+			badge.id = 'ghsync-badge';
 			badge.style.cssText =
 				'position:fixed;right:8px;bottom:8px;z-index:99999;' +
 				'font:12px/1 sans-serif;padding:6px 10px;border-radius:12px;' +
@@ -362,9 +366,11 @@
 	// ---------- 起動 ----------
 
 	async function boot() {
+		console.log('[ghsync] boot');
 		const cfg = loadJson(CONFIG_KEY);
 		if (!cfg || !cfg.token || !cfg.owner || !cfg.repo || !cfg.path) {
 			setStatus('setup', 'クリックして GitHub 同期を設定');
+			console.log('[ghsync] 設定未入力。バッジ表示:', !!document.getElementById('ghsync-badge'));
 			return;
 		}
 		try {
