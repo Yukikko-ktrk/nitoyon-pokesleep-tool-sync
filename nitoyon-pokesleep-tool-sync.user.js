@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeSleep Tool GitHub Sync
 // @namespace    nitoyon-pokesleep-tool-sync
-// @version      2.1.1
+// @version      2.2.0
 // @description  nitoyon pokesleep-tool のボックスを GitHub 上の md ファイル (1行1匹のエクスポート形式) と自動同期する
 // @match        https://nitoyon.github.io/pokesleep-tool/*
 // @grant        none
@@ -14,7 +14,17 @@
 	'use strict';
 
 	// 動作診断用のログ。F12 コンソールで [ghsync] を検索すればどこまで動いたか分かる
-	console.log('[ghsync] script loaded (v2.1.1)', location.href);
+	console.log('[ghsync] script loaded (v2.2.0)', location.href);
+
+	// iOS の「ホーム画面に追加」は manifest の display:standalone により独立 Web アプリ化し、
+	// Safari 拡張が動かず localStorage も別コンテナになって同期できない。
+	// manifest を DOM から外し、ホーム画面追加を「Safari で開くブックマーク」に落とす
+	const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+		(navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+	if (isIOS) {
+		for (const el of document.querySelectorAll('link[rel="manifest"]')) el.remove();
+		console.log('[ghsync] iOS: manifest を除去 (ホーム画面追加が Safari ブックマークになる)');
+	}
 
 	// ボックスの localStorage キー。中身は ["シリアル値@ニックネーム", ...] の JSON 配列で、
 	// md ファイルの各行と 1:1 に対応する (ツールのカスタム形式エクスポートと同一)
