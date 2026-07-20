@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeSleep Screenshot Import (AI OCR)
 // @namespace    pokesleep-screenshot-import
-// @version      1.0.1
+// @version      1.1.0
 // @description  ポケスリのスクショを Gemini (無料枠) / Claude API の vision で読み取り、個体をボックスへ追加する
 // @match        https://nitoyon.github.io/pokesleep-tool/*
 // @grant        none
@@ -15,6 +15,7 @@
 
 	const BOX_KEY = 'PstPokeBox';       // 同期スクリプトと同じボックス
 	const CFG_KEY = 'PstOcrConfig';     // {model, geminiKey, claudeKey}
+	const PENDING_KEY = 'PstOcrPending'; // 編集画面で開く際に残りの読取結果を退避する
 	const DEFAULT_MODEL = 'gemini-3.5-flash';
 	// モデル一覧。gemini-* は Google AI Studio の無料枠で使える。
 	// 廃止済みモデルを指定した場合は callGemini が現行モデルを自動で探して切り替える
@@ -410,7 +411,10 @@
 		document.body.appendChild(panel);
 		ui.log = (msg) => { document.getElementById('ocr-log').textContent = msg; };
 
-		document.getElementById('ocr-close').addEventListener('click', () => panel.remove());
+		document.getElementById('ocr-close').addEventListener('click', () => {
+			localStorage.removeItem(PENDING_KEY); // 続き待ちの読取結果も破棄する
+			panel.remove();
+		});
 		document.getElementById('ocr-pick').addEventListener('click', () => {
 			const model = document.getElementById('ocr-model').value;
 			const geminiKey = document.getElementById('ocr-gemini-key').value.trim();
@@ -451,7 +455,33 @@
 				results.push({ error: String(e.message || e), name: files[i].name });
 			}
 		}
+		const ok = results.filter((r) => r.line);
+		const ng = results.filter((r) => r.error);
+		// 1匹だけ読めてエラーもないときは、そのまま編集画面へ
+		if (ok.length === 1 && ng.length === 0) {
+			openInEditor(ok[0], []);
+			return;
+		}
 		showResults(results);
+	}
+
+	// 読取結果1匹をツールの編集フォーム (ポケモンタブ) に読み込む。
+	// #p=シリアル はツール自身の共有 URL 機能で、起動時にフォームへ反映される。
+	// 追加はツール純正のメニュー「ボックスに追加」から行う (ニックネームもそこで入力)
+	function openInEditor(item, remaining) {
+		try {
+			// 再読み込み後にポケモンタブ (編集フォーム) が前面になるようにする
+			const st = JSON.parse(localStorage.getItem('PstIvState')) || {};
+			st.lowerTabIndex = 0;
+			localStorage.setItem('PstIvState', JSON.stringify(st));
+		} catch (e) { /* 無視 */ }
+		if (remaining.length > 0) {
+			localStorage.setItem(PENDING_KEY, JSON.stringify(remaining));
+		} else {
+			localStorage.removeItem(PENDING_KEY);
+		}
+		location.hash = '#p=' + item.line.split('@')[0];
+		location.reload();
 	}
 
 	function showResults(results) {
@@ -460,16 +490,29 @@
 		if (!div) return;
 		const ok = results.filter((r) => r.line);
 		const ng = results.filter((r) => r.error);
+		const nick = (r) => {
+			const i = r.line.indexOf('@');
+			return i < 0 ? '' : `<br><small>ニックネーム候補: ${r.line.slice(i + 1)} (追加時に入力)</small>`;
+		};
 		div.innerHTML =
-			ok.map((r) => `<div style="margin:4px 0;padding:4px;background:#eef">${r.summary}</div>`).join('') +
+			ok.map((r, i) =>
+				`<div style="margin:4px 0;padding:4px;background:#eef">${r.summary}${nick(r)}<br>` +
+				`<button class="ocr-edit" data-i="${i}">編集画面で開く</button></div>`).join('') +
 			ng.map((r) => `<div style="margin:4px 0;padding:4px;background:#fee">${r.name}: ${r.error}</div>`).join('') +
 			(ok.length > 0
-				? `<div style="margin-top:8px"><button id="ocr-add">${ok.length}匹をボックスへ追加</button></div>`
+				? `<div style="margin-top:8px"><button id="ocr-add">${ok.length}匹を確認せず直接追加</button></div>`
 				: '');
+		for (const btn of div.querySelectorAll('.ocr-edit')) {
+			btn.addEventListener('click', () => {
+				const i = Number(btn.getAttribute('data-i'));
+				openInEditor(ok[i], ok.filter((_, j) => j !== i));
+			});
+		}
 		const addBtn = document.getElementById('ocr-add');
 		if (addBtn) {
 			addBtn.addEventListener('click', () => {
 				const added = addToBox(ok.map((r) => r.line));
+				localStorage.removeItem(PENDING_KEY);
 				ui.log(`${added.length} 匹を追加しました。再読み込みします...`);
 				// アプリは起動時に localStorage を読むため反映には再読み込みが必要。
 				// 再読み込み後、同期スクリプトが GitHub へ自動 push する
@@ -478,9 +521,28 @@
 		}
 	}
 
-	if (document.readyState === 'loading') {
-		document.addEventListener('DOMContentLoaded', makeButton);
-	} else {
+	// 編集画面へ移動した後の残り (キュー) があればパネルを自動再表示する
+	function resumePending() {
+		let pending;
+		try {
+			pending = JSON.parse(localStorage.getItem(PENDING_KEY));
+		} catch (e) {
+			pending = null;
+		}
+		if (!Array.isArray(pending) || pending.length === 0) return;
+		openPanel();
+		ui.log('前回の読取の続きです。1匹ずつ編集画面で開いて追加してください');
+		showResults(pending);
+	}
+
+	function boot() {
 		makeButton();
+		resumePending();
+	}
+
+	if (document.readyState === 'loading') {
+		document.addEventListener('DOMContentLoaded', boot);
+	} else {
+		boot();
 	}
 })();
