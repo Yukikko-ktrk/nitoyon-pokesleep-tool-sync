@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeSleep Screenshot Import (AI OCR)
 // @namespace    pokesleep-screenshot-import
-// @version      1.1.0
+// @version      1.1.1
 // @description  ポケスリのスクショを Gemini (無料枠) / Claude API の vision で読み取り、個体をボックスへ追加する
 // @match        https://nitoyon.github.io/pokesleep-tool/*
 // @grant        none
@@ -375,8 +375,9 @@
 		const btn = document.createElement('div');
 		btn.id = 'ocr-btn';
 		btn.textContent = '📷取込';
+		// 同期スクリプトの ☁ バッジ (右下 bottom:8px) のすぐ上に置く
 		btn.style.cssText =
-			'position:fixed;left:8px;bottom:8px;z-index:99999;' +
+			'position:fixed;right:8px;bottom:44px;z-index:99999;' +
 			'font:12px/1 sans-serif;padding:6px 10px;border-radius:12px;' +
 			'background:rgba(0,0,0,.55);color:#fff;cursor:pointer;user-select:none;';
 		btn.addEventListener('click', openPanel);
@@ -389,7 +390,7 @@
 		const panel = document.createElement('div');
 		panel.id = 'ocr-panel';
 		panel.style.cssText =
-			'position:fixed;left:8px;bottom:40px;z-index:99999;width:300px;max-height:70vh;overflow:auto;' +
+			'position:fixed;right:8px;bottom:76px;z-index:99999;width:300px;max-height:70vh;overflow:auto;' +
 			'font:13px/1.6 sans-serif;padding:12px;border-radius:8px;' +
 			'background:#fff;color:#222;box-shadow:0 2px 12px rgba(0,0,0,.4);';
 		const modelOptions = Object.entries(MODELS).map(([id, label]) =>
