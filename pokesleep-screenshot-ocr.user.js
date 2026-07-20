@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeSleep Screenshot Import (AI OCR)
 // @namespace    pokesleep-screenshot-import
-// @version      1.0.0
+// @version      1.0.1
 // @description  ポケスリのスクショを Gemini (無料枠) / Claude API の vision で読み取り、個体をボックスへ追加する
 // @match        https://nitoyon.github.io/pokesleep-tool/*
 // @grant        none
@@ -15,11 +15,13 @@
 
 	const BOX_KEY = 'PstPokeBox';       // 同期スクリプトと同じボックス
 	const CFG_KEY = 'PstOcrConfig';     // {model, geminiKey, claudeKey}
-	const DEFAULT_MODEL = 'gemini-2.5-flash';
-	// モデル一覧。gemini-* は Google AI Studio の無料枠で使える
+	const DEFAULT_MODEL = 'gemini-3.5-flash';
+	// モデル一覧。gemini-* は Google AI Studio の無料枠で使える。
+	// 廃止済みモデルを指定した場合は callGemini が現行モデルを自動で探して切り替える
 	const MODELS = {
-		'gemini-2.5-flash': 'Gemini Flash (無料枠・推奨)',
-		'gemini-2.5-pro': 'Gemini Pro (無料枠・高精度だが回数少)',
+		'gemini-3.5-flash': 'Gemini 3.5 Flash (無料枠・推奨)',
+		'gemini-3.1-flash-lite': 'Gemini Flash Lite (無料枠・速い)',
+		'gemini-3.1-pro-preview': 'Gemini Pro (無料枠・高精度だが回数少)',
 		'claude-opus-4-8': 'Claude Opus (有料 約5円/枚・最高精度)',
 		'claude-haiku-4-5': 'Claude Haiku (有料 約1円/枚)',
 	};
@@ -248,7 +250,26 @@
 		return JSON.parse(text.text);
 	}
 
-	async function callGemini(cfg, jpegBase64) {
+	// 指定モデルが廃止されていたとき用: 利用可能なモデルから現行の flash 系を選ぶ
+	async function pickCurrentGeminiModel(key) {
+		const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', {
+			headers: { 'x-goog-api-key': key },
+		});
+		if (!res.ok) throw new Error(`モデル一覧の取得に失敗しました (${res.status})`);
+		const json = await res.json();
+		const names = (json.models || [])
+			.filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
+			.map((m) => m.name.replace(/^models\//, ''))
+			.filter((n) => /^gemini-[\d.]+-flash(-lite)?(-preview)?$/.test(n));
+		if (names.length === 0) throw new Error('利用可能な Gemini flash モデルが見つかりません');
+		// 安定版 flash > preview 版 flash > flash-lite の順に、バージョンが新しいものを選ぶ
+		const ver = (n) => parseFloat((n.match(/^gemini-([\d.]+)/) || [])[1] || '0');
+		const rank = (n) => (/-lite/.test(n) ? 0 : /-preview$/.test(n) ? 1 : 2);
+		names.sort((a, b) => (rank(b) - rank(a)) || (ver(b) - ver(a)));
+		return names[0];
+	}
+
+	async function callGemini(cfg, jpegBase64, isRetry) {
 		const url = 'https://generativelanguage.googleapis.com/v1beta/models/' +
 			encodeURIComponent(cfg.model) + ':generateContent';
 		const res = await fetch(url, {
@@ -275,6 +296,15 @@
 		if (!res.ok) {
 			const body = await res.text();
 			if (res.status === 429) throw new Error('Gemini 無料枠の上限に達しました。少し待つか翌日に再実行してください');
+			// モデル廃止 (404) は現行モデルへ自動で切り替えて1回だけ再試行する
+			if (res.status === 404 && !isRetry) {
+				const newModel = await pickCurrentGeminiModel(cfg.geminiKey);
+				const saved = loadCfg();
+				saved.model = newModel;
+				localStorage.setItem(CFG_KEY, JSON.stringify(saved));
+				ui.log && ui.log(`モデルを ${newModel} に自動切替しました`);
+				return callGemini({ ...cfg, model: newModel }, jpegBase64, true);
+			}
 			throw new Error(`Gemini API エラー ${res.status}: ${body.slice(0, 300)}`);
 		}
 		const json = await res.json();
