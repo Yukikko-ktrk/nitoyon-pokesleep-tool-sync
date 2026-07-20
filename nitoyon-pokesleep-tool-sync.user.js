@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeSleep Tool Sync + AI Import
 // @namespace    nitoyon-pokesleep-tool-sync
-// @version      3.0.0
+// @version      3.0.1
 // @description  nitoyon pokesleep-tool のボックスを GitHub と自動同期し、スクショの AI 読取 (Gemini 無料枠 / Claude) で個体を取り込む統合ツール
 // @match        https://nitoyon.github.io/pokesleep-tool/*
 // @grant        none
@@ -13,7 +13,7 @@
 (function () {
 	'use strict';
 
-	console.log('[pst] script loaded (v3.0.0)', typeof location !== 'undefined' ? location.href : 'node');
+	console.log('[pst] script loaded (v3.0.1)', typeof location !== 'undefined' ? location.href : 'node');
 
 	// ---------- 定数 ----------
 
@@ -491,7 +491,12 @@
 				'position:fixed;right:8px;bottom:8px;z-index:99999;' +
 				'font:12px/1 sans-serif;padding:6px 10px;border-radius:12px;' +
 				'background:rgba(0,0,0,.55);color:#fff;cursor:pointer;user-select:none;';
-			badge.addEventListener('click', () => openPanel());
+			// バッジはトグル: 開いていれば閉じる (読取の続きは保持し、再度開くと復元される)
+			badge.addEventListener('click', () => {
+				const p = document.getElementById('pst-panel');
+				if (p) p.remove();
+				else openPanel();
+			});
 			document.body.appendChild(badge);
 		}
 		const marks = { ok: '☁✓', busy: '☁…', dirty: '☁●', error: '☁!', setup: '☁設定' };
@@ -638,6 +643,13 @@
 		document.getElementById('pst-api-save').addEventListener('click', () => {
 			if (saveOcrCfgFromForm()) switchTab('main');
 		});
+
+		// 読取の続き (キュー) が残っていれば一覧を復元する
+		const pending = loadJson(PENDING_KEY);
+		if (Array.isArray(pending) && pending.length > 0) {
+			ocrLog('前回の読取の続きです。1匹ずつ編集画面で開いて追加してください');
+			showResults(pending);
+		}
 	}
 
 	function switchTab(tab) {
@@ -763,12 +775,11 @@
 	}
 
 	// 編集画面へ移動した後の残り (キュー) があればパネルを自動再表示する
+	// (一覧の復元は openPanel 自身が行う)
 	function resumePending() {
 		const pending = loadJson(PENDING_KEY);
 		if (!Array.isArray(pending) || pending.length === 0) return;
 		openPanel('main');
-		ocrLog('前回の読取の続きです。1匹ずつ編集画面で開いて追加してください');
-		showResults(pending);
 	}
 
 	// ---------- 同期本体 ----------
