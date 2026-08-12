@@ -9,13 +9,18 @@ UI は画面右下の ☁📷 バッジのみ。タップすると「メイン (
 
 ## インストール
 
-Tampermonkey (PC) の場合、以下の URL を開くとインストールできる。以後の更新は自動配信される。
+### PC (Tampermonkey)
+
+ブラウザに Tampermonkey 拡張を入れたうえで、以下の URL を開くとインストールできる。
+以後の更新は `@updateURL` 経由で自動配信される。
 
 ```
 https://raw.githubusercontent.com/Yukikko-ktrk/nitoyon-pokesleep-tool-sync/main/nitoyon-pokesleep-tool-sync.user.js
 ```
 
-iPhone (Safari) の場合は App Store の **Userscripts** (Quoid Software) を使う:
+### iPhone (Safari + Userscripts)
+
+App Store の **Userscripts** (Quoid Software) を使う:
 
 1. Userscripts アプリでスクリプト保存用フォルダを設定 (iCloud Drive 推奨)
 2. 上記 URL の中身を `.user.js` ファイルとしてフォルダに保存
@@ -33,6 +38,12 @@ iPhone (Safari) の場合は App Store の **Userscripts** (Quoid Software) を�
 
 API キーはツールページの localStorage に保存されるため、無料の Gemini キーか、
 支出上限を設定した専用キーを使うこと。
+
+### 使い方の注意: 個体を開いたまま取り込まない
+
+ボックスで個別のポケモンを選んでステータス (編集画面) を開いた状態のままスクショを
+読み込んで登録すると、新規追加ではなく**開いていた個体を読み取り結果で上書きしてしまう**。
+取り込む前に、個体を選択していない状態 (一覧表示) に戻してから「画像を選ぶ」こと。
 
 旧 `pokesleep-screenshot-ocr.user.js` (v1.x) は本体へ統合のうえ配信終了した。
 入れていた場合は手動でアンインストールすること。
