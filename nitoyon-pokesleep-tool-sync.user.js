@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeSleep Tool Sync + AI Import
 // @namespace    nitoyon-pokesleep-tool-sync
-// @version      3.0.2
+// @version      3.0.3
 // @description  nitoyon pokesleep-tool のボックスを GitHub と自動同期し、スクショの AI 読取 (Gemini 無料枠 / Claude) で個体を取り込む統合ツール
 // @match        https://nitoyon.github.io/pokesleep-tool/*
 // @grant        none
@@ -13,7 +13,7 @@
 (function () {
 	'use strict';
 
-	console.log('[pst] script loaded (v3.0.2)', typeof location !== 'undefined' ? location.href : 'node');
+	console.log('[pst] script loaded (v3.0.3)', typeof location !== 'undefined' ? location.href : 'node');
 
 	// ---------- 定数 ----------
 
@@ -726,6 +726,9 @@
 			// 再読み込み後にポケモンタブ (編集フォーム) が前面になるようにする
 			const st = loadJson('PstIvState') || {};
 			st.lowerTabIndex = 0;
+			// ボックスで個体を選択中だと、ツールは selectedIv から選択を復元し、
+			// 保存時に box.set でその個体を上書きしてしまう。選択を解除してから開く
+			st.selectedIv = '';
 			saveJson('PstIvState', st);
 		} catch (e) { /* 無視 */ }
 		if (remaining.length > 0) {
