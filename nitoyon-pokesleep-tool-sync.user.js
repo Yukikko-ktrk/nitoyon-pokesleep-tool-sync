@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeSleep Tool Sync + AI Import
 // @namespace    nitoyon-pokesleep-tool-sync
-// @version      3.1.0
+// @version      3.1.1
 // @description  nitoyon pokesleep-tool のボックスを GitHub と自動同期し、スクショの AI 読取 (Gemini 無料枠 / Claude) で個体を取り込む統合ツール
 // @match        https://nitoyon.github.io/pokesleep-tool/*
 // @grant        none
@@ -13,7 +13,7 @@
 (function () {
 	'use strict';
 
-	console.log('[pst] script loaded (v3.1.0)', typeof location !== 'undefined' ? location.href : 'node');
+	console.log('[pst] script loaded (v3.1.1)', typeof location !== 'undefined' ? location.href : 'node');
 
 	// ---------- 定数 ----------
 
@@ -27,16 +27,25 @@
 	const POLL_MS = 5000;   // ローカル変更の監視間隔
 	const STABLE_MS = 4000; // 変更が止まってから push するまでの猶予
 
-	const DEFAULT_MODEL = 'gemini-3.5-flash';
+	const DEFAULT_MODEL = 'gemini-3.8-flash';
 	// モデル一覧。gemini-* は Google AI Studio の無料枠で使える。
 	// 廃止済みモデルを指定した場合は callGemini が現行モデルを自動で探して切り替える
 	const MODELS = {
-		'gemini-3.5-flash': 'Gemini 3.5 Flash (無料枠・推奨)',
-		'gemini-3.1-flash-lite': 'Gemini Flash Lite (無料枠・速い)',
+		'gemini-3.8-flash': 'Gemini 3.8 Flash (無料枠・推奨)',
+		'gemini-3.5-flash': 'Gemini 3.5 Flash (無料枠・旧)',
+		'gemini-3.5-flash-lite': 'Gemini Flash Lite (無料枠・速い)',
 		'gemini-3.1-pro-preview': 'Gemini Pro (無料枠・高精度だが回数少)',
-		'claude-opus-4-8': 'Claude Opus (有料 約5円/枚・最高精度)',
+		'claude-opus-5': 'Claude Opus (有料 約5円/枚・最高精度)',
 		'claude-haiku-4-5': 'Claude Haiku (有料 約1円/枚)',
 	};
+	// 廃止予定モデルの読み替え (保存済み設定を起動時に書き換える)
+	const MODEL_MIGRATION = { 'gemini-3.1-flash-lite': 'gemini-3.5-flash-lite', 'claude-opus-4-8': 'claude-opus-5' };
+	// 一時エラー (過負荷など) の自動再試行
+	const RETRY_STATUSES = new Set([500, 502, 503, 504, 529]); // 529 は Anthropic の overloaded
+	const RETRY_MAX = 4;          // 初回を含む試行回数
+	const RETRY_BASE_MS = 2000;   // 待ち時間 2s → 4s → 8s (±20% ジッタ)
+	// 503 が続いたとき一時的に代替する Gemini モデルの優先順 (設定は書き換えない)
+	const GEMINI_FALLBACK_ORDER = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite'];
 
 	// ---------- 索引データ ----------
 	// 通常は起動時に nitoyon リポジトリの最新データから自動更新される (下の buildData 参照)。
@@ -375,7 +384,14 @@
 	// ---------- AI 読取 (Gemini / Claude) ----------
 
 	function loadOcrCfg() {
-		return loadJson(OCR_CFG_KEY) || {};
+		const cfg = loadJson(OCR_CFG_KEY) || {};
+		if (cfg.model && MODEL_MIGRATION[cfg.model]) {
+			const oldModel = cfg.model;
+			cfg.model = MODEL_MIGRATION[cfg.model];
+			saveJson(OCR_CFG_KEY, cfg);
+			console.log(`[pst] モデル設定を ${oldModel} → ${cfg.model} に移行しました`);
+		}
+		return cfg;
 	}
 
 	function buildPrompt() {
@@ -432,28 +448,69 @@
 		required: ['pokemon', 'level', 'ingredients', 'subskills'],
 	};
 
+	// 一時エラー (5xx / 529 / ネットワーク断) を指数バックオフで再試行する。
+	// doRequest は Response を返す関数。onWait(waitMs, attempt, max) は待機の通知用
+	async function fetchWithRetry(doRequest, onWait, baseMs = RETRY_BASE_MS) {
+		let usedRetryAfter = false;
+		let res;
+		for (let attempt = 1; attempt <= RETRY_MAX; attempt++) {
+			try {
+				res = await doRequest();
+			} catch (e) {
+				// ネットワーク断などで fetch 自体が失敗した場合も再試行の対象にする
+				if (!(e instanceof TypeError) || attempt === RETRY_MAX) throw e;
+				const waitMs = baseMs * 2 ** (attempt - 1) * (0.8 + Math.random() * 0.4);
+				onWait(waitMs, attempt + 1, RETRY_MAX);
+				await new Promise((resolve) => setTimeout(resolve, waitMs));
+				continue;
+			}
+			// 429 は Retry-After (秒・60 以下) が付いていれば1回だけそれに従って再試行する。
+			// ヘッダが無い/60 超なら従来どおり即 return し、呼び出し側の 429 処理に任せる
+			if (res.status === 429 && !usedRetryAfter && attempt < RETRY_MAX) {
+				const retryAfter = Number(res.headers.get('retry-after'));
+				if (Number.isFinite(retryAfter) && retryAfter > 0 && retryAfter <= 60) {
+					usedRetryAfter = true;
+					const waitMs = retryAfter * 1000;
+					onWait(waitMs, attempt + 1, RETRY_MAX);
+					await new Promise((resolve) => setTimeout(resolve, waitMs));
+					continue;
+				}
+			}
+			// ok、または再試行対象外のステータスなら即 return (呼び出し側が従来どおり処理する)
+			if (res.ok || !RETRY_STATUSES.has(res.status)) return res;
+			if (attempt === RETRY_MAX) return res;
+			const waitMs = baseMs * 2 ** (attempt - 1) * (0.8 + Math.random() * 0.4);
+			onWait(waitMs, attempt + 1, RETRY_MAX);
+			await new Promise((resolve) => setTimeout(resolve, waitMs));
+		}
+		return res;
+	}
+
 	async function callClaude(cfg, jpegBase64) {
-		const res = await fetch('https://api.anthropic.com/v1/messages', {
-			method: 'POST',
-			headers: {
-				'x-api-key': cfg.claudeKey,
-				'anthropic-version': '2023-06-01',
-				'anthropic-dangerous-direct-browser-access': 'true',
-				'content-type': 'application/json',
-			},
-			body: JSON.stringify({
-				model: cfg.model,
-				max_tokens: 2000,
-				messages: [{
-					role: 'user',
-					content: [
-						{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: jpegBase64 } },
-						{ type: 'text', text: buildPrompt() },
-					],
-				}],
-				output_config: { format: { type: 'json_schema', schema: CLAUDE_SCHEMA } },
+		const res = await fetchWithRetry(
+			() => fetch('https://api.anthropic.com/v1/messages', {
+				method: 'POST',
+				headers: {
+					'x-api-key': cfg.claudeKey,
+					'anthropic-version': '2023-06-01',
+					'anthropic-dangerous-direct-browser-access': 'true',
+					'content-type': 'application/json',
+				},
+				body: JSON.stringify({
+					model: cfg.model,
+					max_tokens: 2000,
+					messages: [{
+						role: 'user',
+						content: [
+							{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: jpegBase64 } },
+							{ type: 'text', text: buildPrompt() },
+						],
+					}],
+					output_config: { format: { type: 'json_schema', schema: CLAUDE_SCHEMA } },
+				}),
 			}),
-		});
+			(ms, n, max) => ocrLog(`Claude API が混雑中です… ${Math.round(ms / 1000)} 秒後に再試行 (${n}/${max})`)
+		);
 		if (!res.ok) {
 			const body = await res.text();
 			throw new Error(`Claude API エラー ${res.status}: ${body.slice(0, 300)}`);
@@ -484,30 +541,35 @@
 		return names[0];
 	}
 
+	// isRetry は「404 でモデルを自動切替した後」と「503 系で代替モデルに切り替えた後」の
+	// 両方で共用する再試行フラグ (いずれも1回きりなので共用で問題ない)
 	async function callGemini(cfg, jpegBase64, isRetry) {
 		const url = 'https://generativelanguage.googleapis.com/v1beta/models/' +
 			encodeURIComponent(cfg.model) + ':generateContent';
-		const res = await fetch(url, {
-			method: 'POST',
-			headers: {
-				'x-goog-api-key': cfg.geminiKey,
-				'content-type': 'application/json',
-			},
-			body: JSON.stringify({
-				contents: [{
-					role: 'user',
-					parts: [
-						{ inline_data: { mime_type: 'image/jpeg', data: jpegBase64 } },
-						{ text: buildPrompt() },
-					],
-				}],
-				generationConfig: {
-					responseMimeType: 'application/json',
-					responseSchema: GEMINI_SCHEMA,
-					temperature: 0,
+		const res = await fetchWithRetry(
+			() => fetch(url, {
+				method: 'POST',
+				headers: {
+					'x-goog-api-key': cfg.geminiKey,
+					'content-type': 'application/json',
 				},
+				body: JSON.stringify({
+					contents: [{
+						role: 'user',
+						parts: [
+							{ inline_data: { mime_type: 'image/jpeg', data: jpegBase64 } },
+							{ text: buildPrompt() },
+						],
+					}],
+					generationConfig: {
+						responseMimeType: 'application/json',
+						responseSchema: GEMINI_SCHEMA,
+						temperature: 0,
+					},
+				}),
 			}),
-		});
+			(ms, n, max) => ocrLog(`Gemini が混雑中です… ${Math.round(ms / 1000)} 秒後に再試行 (${n}/${max})`)
+		);
 		if (!res.ok) {
 			const body = await res.text();
 			if (res.status === 429) throw new Error('Gemini 無料枠の上限に達しました。少し待つか翌日に再実行してください');
@@ -519,6 +581,18 @@
 				saveJson(OCR_CFG_KEY, saved);
 				ocrLog(`モデルを ${newModel} に自動切替しました`);
 				return callGemini({ ...cfg, model: newModel }, jpegBase64, true);
+			}
+			// 自動再試行でも回復しなかった混雑 (5xx) は、設定は変えずに別の Gemini モデルで
+			// 一時的に1回だけ試す
+			if (RETRY_STATUSES.has(res.status) && !isRetry) {
+				const alt = GEMINI_FALLBACK_ORDER.find((m) => m !== cfg.model);
+				if (alt) {
+					ocrLog(`混雑のため一時的に ${alt} で読取します`);
+					return callGemini({ ...cfg, model: alt }, jpegBase64, true);
+				}
+			}
+			if (RETRY_STATUSES.has(res.status)) {
+				throw new Error(`Gemini が混雑中です (${res.status})。自動再試行しましたが回復しませんでした。少し待って「再試行」を押してください`);
 			}
 			throw new Error(`Gemini API エラー ${res.status}: ${body.slice(0, 300)}`);
 		}
@@ -667,6 +741,9 @@
 			<div class="pst-tabbody" id="pst-tab-api" style="display:none">
 				<b>AI 読取設定</b><br>
 				<label>モデル<br><select id="pst-model" style="width:100%">${modelOptions}</select></label>
+				${ocr.model === 'gemini-3.5-flash'
+					? '<div style="font-size:12px;color:#666">新しい Gemini 3.8 Flash が使えます (混雑しにくい)。モデルを切り替えて保存すると次回から使われます</div>'
+					: ''}
 				<label>Gemini API キー (aistudio.google.com で無料発行)<br>
 					<input id="pst-gemini-key" type="password" style="width:100%" value="${ocr.geminiKey || ''}"></label>
 				<label>Claude API キー (有料モデル利用時のみ)<br>
@@ -774,9 +851,11 @@
 
 	// ---------- スクショ取込フロー ----------
 
-	async function processFiles(files) {
+	let lastResults = []; // 直近の読取結果 (成功+失敗)。失敗分の再試行時に成功分を保持するため保持する
+
+	async function processFiles(files, prevOk = []) {
 		const cfg = loadOcrCfg();
-		const results = [];   // {line, summary} or {error, name}
+		const results = [];   // {line, summary, file} or {error, name, file}
 		for (let i = 0; i < files.length; i++) {
 			ocrLog(`読取中... ${i + 1}/${files.length}`);
 			try {
@@ -790,22 +869,24 @@
 				}
 				const line = ind.nickname ? `${serial}@${ind.nickname}` : serial;
 				results.push({
-					line,
+					line, file: files[i],
 					summary: `${d.pokemon} Lv.${d.level} ${d.nature} ` +
 						`[${d.subskills.map((s) => s || '?').join(' / ')}] 食材${d.ingredient_type}`,
 				});
 			} catch (e) {
-				results.push({ error: String(e.message || e), name: files[i].name });
+				results.push({ error: String(e.message || e), name: files[i].name, file: files[i] });
 			}
 		}
-		const ok = results.filter((r) => r.line);
-		const ng = results.filter((r) => r.error);
+		const all = [...prevOk, ...results];
+		const ok = all.filter((r) => r.line);
+		const ng = all.filter((r) => r.error);
+		lastResults = all;
 		// 1匹だけ読めてエラーもないときは、そのまま編集画面へ
 		if (ok.length === 1 && ng.length === 0) {
 			openInEditor(ok[0], []);
 			return;
 		}
-		showResults(results);
+		showResults(all);
 	}
 
 	// 読取結果1匹をツールの編集フォーム (ポケモンタブ) に読み込む。
@@ -847,6 +928,9 @@
 			ng.map((r) => `<div style="margin:4px 0;padding:4px;background:#fee">${r.name}: ${r.error}</div>`).join('') +
 			(ok.length > 0
 				? `<div style="margin-top:8px"><button id="pst-add">${ok.length}匹を確認せず直接追加</button></div>`
+				: '') +
+			(ng.length > 0 && ng.some((r) => r.file)
+				? `<div style="margin-top:8px"><button id="pst-retry">失敗した ${ng.length} 枚を再試行</button></div>`
 				: '');
 		for (const btn of div.querySelectorAll('.pst-edit')) {
 			btn.addEventListener('click', () => {
@@ -863,6 +947,12 @@
 				// アプリは起動時に localStorage を読むため反映には再読み込みが必要。
 				// 再読み込み後、同期処理が GitHub へ自動 push する
 				setTimeout(() => location.reload(), 800);
+			});
+		}
+		const retryBtn = document.getElementById('pst-retry');
+		if (retryBtn) {
+			retryBtn.addEventListener('click', () => {
+				processFiles(ng.map((r) => r.file), ok);
 			});
 		}
 	}
